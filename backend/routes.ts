@@ -1,6 +1,7 @@
 import type { Express, Request, Response, NextFunction } from "express";
 import express from "express";
 import type { Server } from "node:http";
+import crypto from "node:crypto";
 import multer from "multer";
 import { z } from "zod";
 import {
@@ -37,6 +38,7 @@ import {
   settingsRepo,
 } from "./storage";
 import { defaultContent, seed } from "./seed";
+import { getSupabase } from "./supabase";
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -107,50 +109,51 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     next();
   });
 
-  /* ---------- uploaded media (immutable, long cache) ---------- */
-  app.use(
-    "/uploads",
-    express.static(UPLOAD_DIR, {
-      immutable: true,
-      maxAge: "365d",
-      fallthrough: false,
-      setHeaders: (res) => res.setHeader("Access-Control-Allow-Origin", "*"),
-    }),
-  );
+  if (!process.env.SUPABASE_URL) {
+    app.use(
+      "/uploads",
+      express.static(UPLOAD_DIR, {
+        immutable: true,
+        maxAge: "365d",
+        fallthrough: false,
+        setHeaders: (res) => res.setHeader("Access-Control-Allow-Origin", "*"),
+      }),
+    );
+  }
 
   /* ======================= PUBLIC API ======================= */
   app.get("/api/health", (_req, res) => res.json({ ok: true }));
 
   app.get(
     "/api/site",
-    h((_req, res) => {
+    h(async (_req, res) => {
       res.setHeader("Cache-Control", "no-cache");
       res.json({
-        content: settingsRepo.getContent() ?? defaultContent,
-        services: serviceRepo.list(true),
-        categories: categoryRepo.list().map(({ projectCount, ...c }) => c),
-        cities: cityRepo.list(true).map(publicCity),
+        content: (await settingsRepo.getContent()) ?? defaultContent,
+        services: await serviceRepo.list(true),
+        categories: (await categoryRepo.list()).map(({ projectCount, ...c }) => c),
+        cities: (await cityRepo.list(true)).map(publicCity),
       });
     }),
   );
 
   app.get(
     "/api/projects",
-    h((req, res) => {
+    h(async (req, res) => {
       const category = typeof req.query.category === "string" ? req.query.category : undefined;
       const featured = req.query.featured === "1";
       res.setHeader("Cache-Control", "no-cache");
-      res.json(projectRepo.list({ publishedOnly: true, categorySlug: category, featured }));
+      res.json(await projectRepo.list({ publishedOnly: true, categorySlug: category, featured }));
     }),
   );
 
   app.get(
     "/api/projects/:slug",
-    h((req, res) => {
-      const p = projectRepo.bySlug(String(req.params.slug), true);
+    h(async (req, res) => {
+      const p = await projectRepo.bySlug(String(req.params.slug), true);
       if (!p) return notFound(res, "Project");
-      const others = projectRepo
-        .list({ publishedOnly: true })
+      const others = (await projectRepo
+        .list({ publishedOnly: true }))
         .filter((o) => o.id !== p.id)
         .slice(0, 3);
       res.json({ project: p, related: others });
@@ -160,9 +163,9 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   app.post(
     "/api/enquiries",
     rateLimit(8, 10 * 60 * 1000),
-    h((req, res) => {
+    h(async (req, res) => {
       const data = enquiryInput.parse(req.body);
-      const content = settingsRepo.getContent() ?? defaultContent;
+      const content = (await settingsRepo.getContent()) ?? defaultContent;
 
       let cityId: number | null = null;
       let cityName = data.customCity.trim();
@@ -171,11 +174,11 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       let routedTo = "Head office";
 
       if (data.cityId !== "other") {
-        const city = cityRepo.byId(Number(data.cityId));
+        const city = await cityRepo.byId(Number(data.cityId));
         if (!city || !city.enabled) return res.status(400).json({ message: "Please choose a city from the list." });
         cityId = city.id;
         cityName = city.name;
-        const manager = city.managerId ? managerRepo.byId(city.managerId) : undefined;
+        const manager = city.managerId ? await managerRepo.byId(city.managerId) : undefined;
         if (normaliseWhatsapp(city.routingWhatsapp)) {
           routedNumber = city.routingWhatsapp;
           routedTo = `${city.name} routing line`;
@@ -187,8 +190,8 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         }
       }
 
-      const service = serviceRepo.list(true).find((s) => s.name === data.projectType);
-      const row = enquiryRepo.create({
+      const service = (await serviceRepo.list(true)).find((s) => s.name === data.projectType);
+      const row = await enquiryRepo.create({
         name: data.name,
         phone: data.phone,
         email: data.email,
@@ -230,9 +233,9 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   /* ---------- SEO ---------- */
   app.get(
     "/sitemap.xml",
-    h((req, res) => {
+    h(async (req, res) => {
       const origin = process.env.PUBLIC_SITE_URL || `${req.protocol}://${req.get("host")}`;
-      const urls = ["/", "/work", "/contact", ...projectRepo.list({ publishedOnly: true }).map((p) => `/work/${p.slug}`)];
+      const urls = ["/", "/work", "/contact", ...(await projectRepo.list({ publishedOnly: true })).map((p) => `/work/${p.slug}`)];
       res.type("application/xml").send(
         `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${urls
           .map((u) => `  <url><loc>${origin}${u}</loc></url>`)
@@ -245,9 +248,9 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   app.post(
     "/api/auth/login",
     rateLimit(10, 15 * 60 * 1000),
-    h((req, res) => {
+    h(async (req, res) => {
       const { email, password } = loginInput.parse(req.body);
-      const admin = adminRepo.byEmail(email);
+      const admin = await adminRepo.byEmail(email);
       if (!admin || !verifyPassword(password, admin.passwordHash)) {
         return res.status(401).json({ message: "Email or password is incorrect." });
       }
@@ -260,8 +263,8 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
   admin.get(
     "/me",
-    h((req, res) => {
-      const a = adminRepo.byId(req.admin!.sub);
+    h(async (req, res) => {
+      const a = await adminRepo.byId(req.admin!.sub);
       if (!a) return res.status(401).json({ message: "Please sign in again." });
       res.json({ id: a.id, name: a.name, email: a.email, role: a.role });
     }),
@@ -269,51 +272,59 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
   admin.get(
     "/stats",
-    h((_req, res) => {
+    h(async (_req, res) => {
+      const [projects, totalEnquiries, newEnquiries, cities, services, recent] = await Promise.all([
+        projectRepo.stats(),
+        enquiryRepo.count(),
+        enquiryRepo.countNew(),
+        cityRepo.list(false),
+        serviceRepo.list(false),
+        enquiryRepo.list(),
+      ]);
       res.json({
-        projects: projectRepo.stats(),
-        enquiries: { total: enquiryRepo.count(), new: enquiryRepo.countNew() },
-        cities: cityRepo.list(false).length,
-        services: serviceRepo.list(false).length,
-        recent: enquiryRepo.list().slice(0, 5),
+        projects,
+        enquiries: { total: totalEnquiries, new: newEnquiries },
+        cities: cities.length,
+        services: services.length,
+        recent: recent.slice(0, 5),
       });
     }),
   );
 
   /* ---------- projects ---------- */
-  admin.get("/projects", h((_req, res) => res.json(projectRepo.list({ publishedOnly: false }))));
+  admin.get("/projects", h(async (_req, res) => res.json(await projectRepo.list({ publishedOnly: false }))));
   admin.get(
     "/projects/:id",
-    h((req, res) => {
-      const p = projectRepo.byId(idParam(req));
+    h(async (req, res) => {
+      const p = await projectRepo.byId(idParam(req));
       return p ? res.json(p) : notFound(res, "Project");
     }),
   );
   admin.post(
     "/projects",
-    h((req, res) => {
+    h(async (req, res) => {
       const data = projectInput.parse(req.body);
-      res.status(201).json(projectRepo.create(data));
+      res.status(201).json(await projectRepo.create(data));
     }),
   );
   admin.patch(
     "/projects/:id",
-    h((req, res) => {
+    h(async (req, res) => {
       const id = idParam(req);
       const data = patchOf(projectInput, req.body);
       if (data.published) {
-        const p = projectRepo.byId(id);
+        const p = await projectRepo.byId(id);
         if (p && p.images.length === 0) return res.status(400).json({ message: "Add at least one image before publishing." });
       }
-      const row = projectRepo.update(id, data);
+      const row = await projectRepo.update(id, data);
       return row ? res.json(row) : notFound(res, "Project");
     }),
   );
   admin.delete(
     "/projects/:id",
-    h((req, res) => {
-      const imgs = projectRepo.remove(idParam(req));
-      imgs.forEach((i) => deleteImageFiles(i.basePath));
+    h(async (req, res) => {
+      const imgs = await projectRepo.remove(idParam(req));
+      await Promise.all(imgs.map((image) => deleteImageFiles(image.basePath)));
       res.status(204).end();
     }),
   );
@@ -324,7 +335,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     upload.array("images", MAX_FILES_PER_REQUEST),
     h(async (req, res) => {
       const id = idParam(req);
-      const project = projectRepo.byId(id);
+      const project = await projectRepo.byId(id);
       if (!project) return notFound(res, "Project");
       const files = (req.files as Express.Multer.File[]) || [];
       if (!files.length) return res.status(400).json({ message: "Choose at least one image." });
@@ -333,7 +344,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       for (const f of files) {
         try {
           const out = await processImage(f.buffer);
-          created.push(imageRepo.add(id, { ...out, alt: `${project.name} — ${project.category?.name ?? "interior"}` }));
+          created.push(await imageRepo.add(id, { ...out, alt: `${project.name} — ${project.category?.name ?? "interior"}` }));
         } catch (e) {
           failed.push({ file: f.originalname, reason: (e as Error).message });
         }
@@ -343,28 +354,28 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   );
   admin.patch(
     "/images/:id",
-    h((req, res) => {
-      const row = imageRepo.update(idParam(req), imageUpdateInput.parse(req.body));
+    h(async (req, res) => {
+      const row = await imageRepo.update(idParam(req), imageUpdateInput.parse(req.body));
       return row ? res.json(row) : notFound(res, "Image");
     }),
   );
   admin.post(
     "/projects/:id/images/reorder",
-    h((req, res) => {
+    h(async (req, res) => {
       const ids = z.array(z.number().int().positive()).max(200).parse(req.body?.ids);
-      imageRepo.reorder(idParam(req), ids);
+      await imageRepo.reorder(idParam(req), ids);
       res.json({ ok: true });
     }),
   );
   admin.delete(
     "/images/:id",
-    h((req, res) => {
-      const img = imageRepo.remove(idParam(req));
+    h(async (req, res) => {
+      const img = await imageRepo.remove(idParam(req));
       if (!img) return notFound(res, "Image");
-      deleteImageFiles(img.basePath);
+      await deleteImageFiles(img.basePath);
       // keep the site consistent: an image-less project is hidden
-      const p = projectRepo.byId(img.projectId);
-      if (p && p.images.length === 0 && p.published) projectRepo.update(p.id, { published: false });
+      const p = await projectRepo.byId(img.projectId);
+      if (p && p.images.length === 0 && p.published) await projectRepo.update(p.id, { published: false });
       res.status(204).end();
     }),
   );
@@ -379,87 +390,139 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       res.status(201).json(out);
     }),
   );
+  admin.post(
+    "/uploads/sign",
+    h(async (req, res) => {
+      const contentType = z
+        .enum(["image/jpeg", "image/png", "image/webp", "image/avif", "image/heic", "image/heif", "image/tiff"])
+        .parse(req.body?.contentType);
+      const path = `incoming/${crypto.randomUUID()}`;
+      const { data, error } = await getSupabase().storage.from("oakline-uploads").createSignedUploadUrl(path);
+      if (error) throw new Error(`Could not prepare image upload: ${error.message}`);
+      res.status(201).json({ path: data.path, token: data.token, contentType });
+    }),
+  );
+  admin.post(
+    "/uploads/finalize",
+    h(async (req, res) => {
+      const { path: incomingPath, projectId } = z
+        .object({
+          path: z.string().regex(/^incoming\/[0-9a-f-]{36}$/i),
+          projectId: z.number().int().positive().optional(),
+        })
+        .parse(req.body);
+      const supabase = getSupabase();
+      const bucket = supabase.storage.from("oakline-uploads");
+      const { data, error } = await bucket.download(incomingPath);
+      if (error) throw new Error(`Could not read uploaded image: ${error.message}`);
+      if (!data) throw new Error("The uploaded image could not be found.");
+
+      let image: Awaited<ReturnType<typeof processImage>>;
+      try {
+        image = await processImage(Buffer.from(await data.arrayBuffer()));
+      } finally {
+        const { error: cleanupError } = await bucket.remove([incomingPath]);
+        if (cleanupError) console.error("Could not remove temporary upload:", cleanupError.message);
+      }
+
+      if (projectId === undefined) {
+        res.status(201).json(image);
+        return;
+      }
+
+      const project = await projectRepo.byId(projectId);
+      if (!project) {
+        await deleteImageFiles(image.basePath);
+        return notFound(res, "Project");
+      }
+      const created = await imageRepo.add(projectId, {
+        ...image,
+        alt: `${project.name} — ${project.category?.name ?? "interior"}`,
+      });
+      res.status(201).json(created);
+    }),
+  );
 
   /* ---------- categories ---------- */
-  admin.get("/categories", h((_req, res) => res.json(categoryRepo.list())));
+  admin.get("/categories", h(async (_req, res) => res.json(await categoryRepo.list())));
   admin.post(
     "/categories",
-    h((req, res) => {
+    h(async (req, res) => {
       const d = categoryInput.parse(req.body);
-      res.status(201).json(categoryRepo.create(d.name, d.sortOrder));
+      res.status(201).json(await categoryRepo.create(d.name, d.sortOrder));
     }),
   );
   admin.patch(
     "/categories/:id",
-    h((req, res) => {
+    h(async (req, res) => {
       const d = categoryInput.parse(req.body);
-      const row = categoryRepo.update(idParam(req), d.name, d.sortOrder);
+      const row = await categoryRepo.update(idParam(req), d.name, d.sortOrder);
       return row ? res.json(row) : notFound(res, "Category");
     }),
   );
   admin.delete(
     "/categories/:id",
-    h((req, res) => {
+    h(async (req, res) => {
       const id = idParam(req);
-      const cat = categoryRepo.list().find((c) => c.id === id);
+      const cat = (await categoryRepo.list()).find((c) => c.id === id);
       if (cat && cat.projectCount > 0) {
         return res.status(409).json({ message: `Move the ${cat.projectCount} project(s) in "${cat.name}" to another category first.` });
       }
-      categoryRepo.remove(id);
+      await categoryRepo.remove(id);
       res.status(204).end();
     }),
   );
 
   /* ---------- services ---------- */
-  admin.get("/services", h((_req, res) => res.json(serviceRepo.list(false))));
-  admin.post("/services", h((req, res) => res.status(201).json(serviceRepo.create(serviceInput.parse(req.body)))));
+  admin.get("/services", h(async (_req, res) => res.json(await serviceRepo.list(false))));
+  admin.post("/services", h(async (req, res) => res.status(201).json(await serviceRepo.create(serviceInput.parse(req.body)))));
   admin.patch(
     "/services/:id",
-    h((req, res) => {
-      const row = serviceRepo.update(idParam(req), patchOf(serviceInput, req.body));
+    h(async (req, res) => {
+      const row = await serviceRepo.update(idParam(req), patchOf(serviceInput, req.body));
       return row ? res.json(row) : notFound(res, "Service");
     }),
   );
   admin.delete(
     "/services/:id",
-    h((req, res) => {
-      serviceRepo.remove(idParam(req));
+    h(async (req, res) => {
+      await serviceRepo.remove(idParam(req));
       res.status(204).end();
     }),
   );
 
   /* ---------- city managers ---------- */
-  admin.get("/managers", h((_req, res) => res.json(managerRepo.list())));
-  admin.post("/managers", h((req, res) => res.status(201).json(managerRepo.create(managerInput.parse(req.body)))));
+  admin.get("/managers", h(async (_req, res) => res.json(await managerRepo.list())));
+  admin.post("/managers", h(async (req, res) => res.status(201).json(await managerRepo.create(managerInput.parse(req.body)))));
   admin.patch(
     "/managers/:id",
-    h((req, res) => {
-      const row = managerRepo.update(idParam(req), patchOf(managerInput, req.body));
+    h(async (req, res) => {
+      const row = await managerRepo.update(idParam(req), patchOf(managerInput, req.body));
       return row ? res.json(row) : notFound(res, "Manager");
     }),
   );
   admin.delete(
     "/managers/:id",
-    h((req, res) => {
-      managerRepo.remove(idParam(req));
+    h(async (req, res) => {
+      await managerRepo.remove(idParam(req));
       res.status(204).end();
     }),
   );
 
   /* ---------- cities ---------- */
-  admin.get("/cities", h((_req, res) => res.json(cityRepo.list(false))));
-  admin.post("/cities", h((req, res) => res.status(201).json(cityRepo.create(cityInput.parse(req.body)))));
+  admin.get("/cities", h(async (_req, res) => res.json(await cityRepo.list(false))));
+  admin.post("/cities", h(async (req, res) => res.status(201).json(await cityRepo.create(cityInput.parse(req.body)))));
   admin.patch(
     "/cities/:id",
-    h((req, res) => {
-      const row = cityRepo.update(idParam(req), patchOf(cityInput, req.body));
+    h(async (req, res) => {
+      const row = await cityRepo.update(idParam(req), patchOf(cityInput, req.body));
       return row ? res.json(row) : notFound(res, "City");
     }),
   );
   admin.delete(
     "/cities/:id",
-    h((req, res) => {
-      cityRepo.remove(idParam(req));
+    h(async (req, res) => {
+      await cityRepo.remove(idParam(req));
       res.status(204).end();
     }),
   );
@@ -467,26 +530,26 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   /* ---------- enquiries ---------- */
   admin.get(
     "/enquiries",
-    h((req, res) => res.json(enquiryRepo.list(typeof req.query.status === "string" ? req.query.status : undefined))),
+    h(async (req, res) => res.json(await enquiryRepo.list(typeof req.query.status === "string" ? req.query.status : undefined))),
   );
   admin.patch(
     "/enquiries/:id",
-    h((req, res) => {
-      const row = enquiryRepo.setStatus(idParam(req), enquiryStatusInput.parse(req.body).status);
+    h(async (req, res) => {
+      const row = await enquiryRepo.setStatus(idParam(req), enquiryStatusInput.parse(req.body).status);
       return row ? res.json(row) : notFound(res, "Enquiry");
     }),
   );
   admin.delete(
     "/enquiries/:id",
-    h((req, res) => {
-      enquiryRepo.remove(idParam(req));
+    h(async (req, res) => {
+      await enquiryRepo.remove(idParam(req));
       res.status(204).end();
     }),
   );
 
   /* ---------- site content ---------- */
-  admin.get("/content", h((_req, res) => res.json(settingsRepo.getContent() ?? defaultContent)));
-  admin.put("/content", h((req, res) => res.json(settingsRepo.setContent(siteContentSchema.parse(req.body)))));
+  admin.get("/content", h(async (_req, res) => res.json((await settingsRepo.getContent()) ?? defaultContent)));
+  admin.put("/content", h(async (req, res) => res.json(await settingsRepo.setContent(siteContentSchema.parse(req.body)))));
 
   app.use("/api/admin", admin);
 
@@ -509,7 +572,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       return res.status(400).json({ message: msg });
     }
     if (err instanceof ImageValidationError) return res.status(400).json({ message: err.message });
-    if (err?.code === "SQLITE_CONSTRAINT_FOREIGNKEY") return res.status(409).json({ message: "This item is still linked to other records." });
+    if (err?.code === "23503") return res.status(409).json({ message: "This item is still linked to other records." });
     next(err);
   });
 

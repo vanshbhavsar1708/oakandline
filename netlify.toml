@@ -1,6 +1,4 @@
-# Oak & Line — Netlify hosts the public website + admin screens (static files).
-# The API, database and uploaded photos live on the client-owned Node host (see DEPLOYMENT.md).
-# Required Netlify environment variable: API_ORIGIN  (e.g. https://oakline-api.onrender.com)
+# Oak & Line — Netlify hosts the website and Express API; Supabase stores app data and uploads.
 [build]
   command = "npm run build:netlify"
   publish = "dist/public"
@@ -8,6 +6,11 @@
 [build.environment]
   NODE_VERSION = "20"
   VITE_ROUTER = "browser"
+
+[functions]
+  directory = "netlify/functions"
+  node_bundler = "esbuild"
+  external_node_modules = ["sharp"]
 
 [[headers]]
   for = "/assets/*"

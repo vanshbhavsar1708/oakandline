@@ -132,49 +132,62 @@ async function seedImage(projectId: number, file: string, alt: string) {
   const src = ["png", "jpg", "jpeg", "webp"].map((e) => path.join(SEED_DIR, `${file}.${e}`)).find((p) => fs.existsSync(p));
   if (!src) return;
   const out = await processImage(fs.readFileSync(src));
-  imageRepo.add(projectId, { ...out, alt });
+  await imageRepo.add(projectId, { ...out, alt });
 }
 
 export async function seed() {
-  // Demo projects are added only on a brand-new database, so deleting them later is permanent.
-  const fresh = !settingsRepo.getContent();
-  if (adminRepo.count() === 0) {
+  const [existingContent, adminCount, services, categories, cities] = await Promise.all([
+    settingsRepo.getContent(),
+    adminRepo.count(),
+    serviceRepo.list(false),
+    categoryRepo.list(),
+    cityRepo.list(false),
+  ]);
+  const fresh = !existingContent;
+
+  if (adminCount === 0) {
     const email = process.env.ADMIN_EMAIL || "admin@oakandline.in";
     const password = process.env.ADMIN_PASSWORD || (process.env.NODE_ENV === "production" ? "" : "OakLine@2026");
     if (!password) throw new Error("ADMIN_PASSWORD must be set for the first production boot");
-    adminRepo.create({ email, name: "Studio Admin", passwordHash: hashPassword(password), role: "owner" });
+    await adminRepo.create({ email, name: "Studio Admin", passwordHash: hashPassword(password), role: "owner" });
     console.log(`[seed] created admin ${email}`);
   }
 
-  if (!settingsRepo.getContent()) settingsRepo.setContent(defaultContent);
+  if (!existingContent) await settingsRepo.setContent(defaultContent);
 
-  if (serviceRepo.list(false).length === 0) {
-    SERVICES.forEach((s, i) => serviceRepo.create({ ...s, visible: true, sortOrder: i }));
+  if (services.length === 0) {
+    await Promise.all(
+      SERVICES.map((service, sortOrder) => serviceRepo.create({ ...service, visible: true, sortOrder })),
+    );
   }
 
-  if (categoryRepo.list().length === 0) {
-    CATEGORIES.forEach((c, i) => categoryRepo.create(c, i));
+  if (categories.length === 0) {
+    await Promise.all(CATEGORIES.map((category, sortOrder) => categoryRepo.create(category, sortOrder)));
   }
 
-  if (cityRepo.list(false).length === 0) {
-    const amd = managerRepo.create({ name: "Ahmedabad Studio Desk", title: "City Manager", phone: "+91 98000 00001", whatsapp: "919800000001", email: "ahmedabad@oakandline.in", active: true });
-    const srt = managerRepo.create({ name: "Surat Manager", title: "City Manager", phone: "+91 98000 00002", whatsapp: "919800000002", email: "surat@oakandline.in", active: true });
+  if (cities.length === 0) {
+    const [amd, srt] = await Promise.all([
+      managerRepo.create({ name: "Ahmedabad Studio Desk", title: "City Manager", phone: "+91 98000 00001", whatsapp: "919800000001", email: "ahmedabad@oakandline.in", active: true }),
+      managerRepo.create({ name: "Surat Manager", title: "City Manager", phone: "+91 98000 00002", whatsapp: "919800000002", email: "surat@oakandline.in", active: true }),
+    ]);
     const cityRows: { name: string; managerId: number | null }[] = [
       { name: "Ahmedabad", managerId: amd.id },
       { name: "Gandhinagar", managerId: amd.id },
       { name: "Surat", managerId: srt.id },
       { name: "Vadodara", managerId: null },
     ];
-    cityRows.forEach((c, i) =>
-      cityRepo.create({ name: c.name, state: "Gujarat", enabled: true, sortOrder: i, managerId: c.managerId, routingWhatsapp: "", routingEmail: "", routingNotes: "" }),
+    await Promise.all(
+      cityRows.map((city, sortOrder) =>
+        cityRepo.create({ name: city.name, state: "Gujarat", enabled: true, sortOrder, managerId: city.managerId, routingWhatsapp: "", routingEmail: "", routingNotes: "" }),
+      ),
     );
   }
 
-  if (fresh && process.env.SEED_DEMO_PROJECTS !== "false" && projectRepo.list({ publishedOnly: false }).length === 0) {
-    const cats = new Map(categoryRepo.list().map((c) => [c.name, c.id]));
+  if (fresh && process.env.SEED_DEMO_PROJECTS !== "false" && (await projectRepo.list({ publishedOnly: false })).length === 0) {
+    const cats = new Map((await categoryRepo.list()).map((category) => [category.name, category.id]));
     for (let i = 0; i < PROJECTS.length; i++) {
       const p = PROJECTS[i];
-      const row = projectRepo.create({
+      const row = await projectRepo.create({
         name: p.name, location: p.location, categoryId: cats.get(p.category)!, summary: p.summary,
         description: p.description, areaSqft: p.areaSqft ?? null, year: p.year ?? null,
         featured: !!p.featured, published: true, sortOrder: i,

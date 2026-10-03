@@ -1,7 +1,8 @@
 import { useRef, useState, type ReactNode } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { ImagePlus, Loader2, Trash2, UploadCloud } from "lucide-react";
-import { ApiError, apiUpload, imageUrl, queryClient } from "@/lib/queryClient";
+import { ApiError, imageUrl, queryClient } from "@/lib/queryClient";
+import { apiUpload } from "@/lib/supabase-upload";
 import { useToast } from "@/hooks/use-toast";
 import { Button } from "@/components/ui/button";
 import {

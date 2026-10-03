@@ -8,7 +8,7 @@ import { createServer } from "node:http";
 const app = express();
 const httpServer = createServer(app);
 
-// Behind Netlify / Render / Railway proxies, use the visitor's real IP (for rate limiting).
+// Behind Netlify proxies, use the visitor's real IP for rate limiting.
 // TRUST_PROXY: "true", "false" or a hop count. Defaults to true in production.
 const trust = process.env.TRUST_PROXY ?? (process.env.NODE_ENV === "production" ? "true" : "false");
 app.set("trust proxy", /^\d+$/.test(trust) ? Number(trust) : trust === "true");

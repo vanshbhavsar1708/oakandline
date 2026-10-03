@@ -1,31 +1,94 @@
-import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
-import { db } from "./db";
-import {
-  admins,
-  categories,
-  cities,
-  cityManagers,
-  enquiries,
-  projectImages,
-  projects,
-  services,
-  siteSettings,
-  type Admin,
-  type Category,
-  type City,
-  type CityInput,
-  type CityManager,
-  type CityWithManager,
-  type Enquiry,
-  type ManagerInput,
-  type Project,
-  type ProjectImage,
-  type ProjectInput,
-  type ProjectWithImages,
-  type Service,
-  type ServiceInput,
-  type SiteContent,
+import { getSupabase } from "./supabase";
+import type {
+  Admin,
+  Category,
+  City,
+  CityInput,
+  CityManager,
+  CityWithManager,
+  Enquiry,
+  ManagerInput,
+  Project,
+  ProjectImage,
+  ProjectInput,
+  ProjectWithImages,
+  Service,
+  ServiceInput,
+  SiteContent,
 } from "@shared/schema";
+
+type TableName = "admins" | "categories" | "cities" | "city_managers" | "enquiries" | "project_images" | "projects" | "services" | "site_settings";
+type DbRow = Record<string, unknown>;
+
+function camelKey(key: string) {
+  return key.replace(/_([a-z])/g, (_match, letter: string) => letter.toUpperCase());
+}
+
+function fromDb<T>(row: DbRow): T {
+  return Object.fromEntries(Object.entries(row).map(([key, value]) => [camelKey(key), value])) as T;
+}
+
+function toDb(row: Record<string, unknown>) {
+  return Object.fromEntries(
+    Object.entries(row).map(([key, value]) => [key.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`), value]),
+  );
+}
+
+async function run<T>(query: PromiseLike<{ data: unknown; error: { message: string; code?: string } | null }>): Promise<T> {
+  const { data, error } = await query;
+  if (error) throw Object.assign(new Error(error.message), { code: error.code });
+  return data as T;
+}
+
+async function rows<T>(table: TableName, query: (q: any) => any): Promise<T[]> {
+  const data = await run<DbRow[]>(query(getSupabase().from(table).select("*")));
+  return data.map((row) => fromDb<T>(row));
+}
+
+async function byId<T>(table: TableName, id: number): Promise<T | undefined> {
+  const data = await run<DbRow | null>(getSupabase().from(table).select("*").eq("id", id).maybeSingle());
+  return data ? fromDb<T>(data) : undefined;
+}
+
+async function insertOne<T>(table: TableName, value: Record<string, unknown>): Promise<T> {
+  const data = await run<DbRow>(getSupabase().from(table).insert(toDb(value)).select("*").single());
+  return fromDb<T>(data);
+}
+
+async function updateOne<T>(table: TableName, id: number, value: Record<string, unknown>): Promise<T | undefined> {
+  const data = await run<DbRow | null>(
+    getSupabase().from(table).update(toDb(value)).eq("id", id).select("*").maybeSingle(),
+  );
+  return data ? fromDb<T>(data) : undefined;
+}
+
+async function existsById(table: TableName, id: number) {
+  const data = await run<DbRow[]>(
+    getSupabase().from(table).delete().eq("id", id).select("id"),
+  );
+  return data.length > 0;
+}
+
+async function countRows(table: TableName, column = "id", value?: unknown) {
+  let query = getSupabase().from(table).select("id", { count: "exact", head: true });
+  if (column !== "id" || value !== undefined) query = query.eq(column, value);
+  const { count, error } = await query;
+  if (error) throw Object.assign(new Error(error.message), { code: error.code });
+  return count ?? 0;
+}
+
+async function uniqueSlug(table: TableName, base: string, ignoreId?: number) {
+  const stem = slugify(base) || "item";
+  let slug = stem;
+  let n = 1;
+  while (true) {
+    let query = getSupabase().from(table).select("id").eq("slug", slug);
+    if (ignoreId !== undefined) query = query.neq("id", ignoreId);
+    const existing = await run<DbRow | null>(query.maybeSingle());
+    if (!existing) return slug;
+    slug = `${stem}-${++n}`;
+  }
+}
 
 export function slugify(input: string): string {
   return input
@@ -37,261 +100,235 @@ export function slugify(input: string): string {
     .slice(0, 80);
 }
 
-function uniqueSlug(table: typeof projects | typeof services | typeof cities | typeof categories, base: string, ignoreId?: number) {
-  let slug = slugify(base) || "item";
-  let n = 1;
-  // eslint-disable-next-line no-constant-condition
-  while (true) {
-    const existing = db.select({ id: table.id }).from(table).where(eq(table.slug, slug)).get();
-    if (!existing || existing.id === ignoreId) return slug;
-    n += 1;
-    slug = `${slugify(base)}-${n}`;
-  }
-}
-
-/* -------------------------------- Admins ------------------------------- */
 export const adminRepo = {
-  byEmail: (email: string): Admin | undefined =>
-    db.select().from(admins).where(eq(admins.email, email.toLowerCase())).get(),
-  byId: (id: number): Admin | undefined => db.select().from(admins).where(eq(admins.id, id)).get(),
-  count: () => db.select({ c: sql<number>`count(*)` }).from(admins).get()?.c ?? 0,
-  create: (a: { email: string; name: string; passwordHash: string; role?: string }) =>
-    db.insert(admins).values({ ...a, email: a.email.toLowerCase() }).returning().get(),
-};
-
-/* ------------------------------ Categories ----------------------------- */
-export const categoryRepo = {
-  list: (): (Category & { projectCount: number })[] => {
-    const rows = db.select().from(categories).orderBy(asc(categories.sortOrder), asc(categories.name)).all();
-    const counts = db
-      .select({ id: projects.categoryId, c: sql<number>`count(*)` })
-      .from(projects)
-      .groupBy(projects.categoryId)
-      .all();
-    const map = new Map(counts.map((r) => [r.id, r.c]));
-    return rows.map((r) => ({ ...r, projectCount: map.get(r.id) ?? 0 }));
+  byEmail: async (email: string): Promise<Admin | undefined> => {
+    const row = await run<DbRow | null>(
+      getSupabase().from("admins").select("*").eq("email", email.toLowerCase()).maybeSingle(),
+    );
+    return row ? fromDb<Admin>(row) : undefined;
   },
-  create: (name: string, sortOrder = 0) =>
-    db.insert(categories).values({ name, slug: uniqueSlug(categories, name), sortOrder }).returning().get(),
-  update: (id: number, name: string, sortOrder = 0) =>
-    db
-      .update(categories)
-      .set({ name, sortOrder, slug: uniqueSlug(categories, name, id) })
-      .where(eq(categories.id, id))
-      .returning()
-      .get(),
-  remove: (id: number) => db.delete(categories).where(eq(categories.id, id)).run().changes > 0,
+  byId: (id: number) => byId<Admin>("admins", id),
+  count: () => countRows("admins"),
+  create: (admin: { email: string; name: string; passwordHash: string; role?: string }) =>
+    insertOne<Admin>("admins", { ...admin, email: admin.email.toLowerCase() }),
 };
 
-/* ------------------------------- Projects ------------------------------ */
-function attach(rows: Project[]): ProjectWithImages[] {
-  if (!rows.length) return [];
-  const ids = rows.map((r) => r.id);
-  const imgs = db
-    .select()
-    .from(projectImages)
-    .where(inArray(projectImages.projectId, ids))
-    .orderBy(desc(projectImages.isCover), asc(projectImages.sortOrder), asc(projectImages.id))
-    .all();
-  const cats = db.select().from(categories).all();
-  const catMap = new Map(cats.map((c) => [c.id, c]));
-  return rows.map((p) => ({
-    ...p,
-    category: p.categoryId ? catMap.get(p.categoryId) ?? null : null,
-    images: imgs.filter((i) => i.projectId === p.id),
+export const categoryRepo = {
+  list: async (): Promise<(Category & { projectCount: number })[]> => {
+    const [categoryRows, projectRows] = await Promise.all([
+      rows<Category>("categories", (q) => q.order("sort_order").order("name")),
+      rows<Pick<Project, "categoryId">>("projects", (q) => q.select("category_id")),
+    ]);
+    const counts = new Map<number | null, number>();
+    for (const project of projectRows) counts.set(project.categoryId, (counts.get(project.categoryId) ?? 0) + 1);
+    return categoryRows.map((category) => ({ ...category, projectCount: counts.get(category.id) ?? 0 }));
+  },
+  create: async (name: string, sortOrder = 0) =>
+    insertOne<Category>("categories", { name, slug: await uniqueSlug("categories", name), sortOrder }),
+  update: async (id: number, name: string, sortOrder = 0) =>
+    updateOne<Category>("categories", id, { name, sortOrder, slug: await uniqueSlug("categories", name, id) }),
+  remove: (id: number) => existsById("categories", id),
+};
+
+async function attach(projectRows: Project[]): Promise<ProjectWithImages[]> {
+  if (!projectRows.length) return [];
+  const ids = projectRows.map((project) => project.id);
+  const [imageRows, categoryRows] = await Promise.all([
+    rows<ProjectImage>("project_images", (q) => q.in("project_id", ids).order("is_cover", { ascending: false }).order("sort_order").order("id")),
+    rows<Category>("categories", (q) => q),
+  ]);
+  const categories = new Map(categoryRows.map((category) => [category.id, category]));
+  return projectRows.map((project) => ({
+    ...project,
+    category: project.categoryId ? categories.get(project.categoryId) ?? null : null,
+    images: imageRows.filter((image) => image.projectId === project.id),
   }));
 }
 
 export const projectRepo = {
-  list: (opts: { publishedOnly: boolean; categorySlug?: string; featured?: boolean }): ProjectWithImages[] => {
-    const conds = [];
-    if (opts.publishedOnly) conds.push(eq(projects.published, true));
-    if (opts.featured) conds.push(eq(projects.featured, true));
+  list: async (opts: { publishedOnly: boolean; categorySlug?: string; featured?: boolean }): Promise<ProjectWithImages[]> => {
+    let query = getSupabase().from("projects").select("*").order("sort_order").order("id", { ascending: false });
+    if (opts.publishedOnly) query = query.eq("published", true);
+    if (opts.featured) query = query.eq("featured", true);
     if (opts.categorySlug && opts.categorySlug !== "all") {
-      const cat = db.select().from(categories).where(eq(categories.slug, opts.categorySlug)).get();
-      if (!cat) return [];
-      conds.push(eq(projects.categoryId, cat.id));
+      const category = await run<DbRow | null>(
+        getSupabase().from("categories").select("id").eq("slug", opts.categorySlug).maybeSingle(),
+      );
+      if (!category) return [];
+      query = query.eq("category_id", category.id);
     }
-    const rows = db
-      .select()
-      .from(projects)
-      .where(conds.length ? and(...conds) : undefined)
-      .orderBy(asc(projects.sortOrder), desc(projects.id))
-      .all();
-    return attach(rows);
+    const data = await run<DbRow[]>(query);
+    return attach(data.map((row) => fromDb<Project>(row)));
   },
-  bySlug: (slug: string, publishedOnly: boolean): ProjectWithImages | undefined => {
-    const row = db.select().from(projects).where(eq(projects.slug, slug)).get();
-    if (!row || (publishedOnly && !row.published)) return undefined;
-    return attach([row])[0];
+  bySlug: async (slug: string, publishedOnly: boolean): Promise<ProjectWithImages | undefined> => {
+    const data = await run<DbRow | null>(
+      getSupabase().from("projects").select("*").eq("slug", slug).maybeSingle(),
+    );
+    if (!data) return undefined;
+    const project = fromDb<Project>(data);
+    if (publishedOnly && !project.published) return undefined;
+    return (await attach([project]))[0];
   },
-  byId: (id: number): ProjectWithImages | undefined => {
-    const row = db.select().from(projects).where(eq(projects.id, id)).get();
-    return row ? attach([row])[0] : undefined;
+  byId: async (id: number) => {
+    const project = await byId<Project>("projects", id);
+    return project ? (await attach([project]))[0] : undefined;
   },
-  create: (input: ProjectInput) =>
-    db
-      .insert(projects)
-      .values({ ...input, areaSqft: input.areaSqft ?? null, year: input.year ?? null, slug: uniqueSlug(projects, input.name) })
-      .returning()
-      .get(),
-  update: (id: number, input: Partial<ProjectInput>) => {
-    const patch: Partial<Project> = { ...input } as Partial<Project>;
-    if (input.name) patch.slug = uniqueSlug(projects, input.name, id);
-    return db.update(projects).set(patch).where(eq(projects.id, id)).returning().get();
+  create: async (input: ProjectInput) =>
+    insertOne<Project>("projects", {
+      ...input,
+      areaSqft: input.areaSqft ?? null,
+      year: input.year ?? null,
+      slug: await uniqueSlug("projects", input.name),
+    }),
+  update: async (id: number, input: Partial<ProjectInput>) => {
+    const patch: Record<string, unknown> = { ...input };
+    if (input.name) patch.slug = await uniqueSlug("projects", input.name, id);
+    return updateOne<Project>("projects", id, patch);
   },
-  remove: (id: number): ProjectImage[] => {
-    const imgs = db.select().from(projectImages).where(eq(projectImages.projectId, id)).all();
-    db.delete(projects).where(eq(projects.id, id)).run();
-    return imgs;
+  remove: async (id: number): Promise<ProjectImage[]> => {
+    const images = await rows<ProjectImage>("project_images", (q) => q.eq("project_id", id));
+    await run(getSupabase().from("projects").delete().eq("id", id));
+    return images;
   },
-  stats: () => {
-    const total = db.select({ c: sql<number>`count(*)` }).from(projects).get()?.c ?? 0;
-    const published = db.select({ c: sql<number>`count(*)` }).from(projects).where(eq(projects.published, true)).get()?.c ?? 0;
-    const images = db.select({ c: sql<number>`count(*)` }).from(projectImages).get()?.c ?? 0;
+  stats: async () => {
+    const [total, published, images] = await Promise.all([
+      countRows("projects"),
+      countRows("projects", "published", true),
+      countRows("project_images"),
+    ]);
     return { total, published, images };
   },
 };
 
 export const imageRepo = {
-  add: (projectId: number, img: { basePath: string; width: number; height: number; alt: string }) => {
-    const max = db
-      .select({ m: sql<number>`coalesce(max(sort_order), -1)` })
-      .from(projectImages)
-      .where(eq(projectImages.projectId, projectId))
-      .get()?.m ?? -1;
-    const hasCover = db
-      .select({ id: projectImages.id })
-      .from(projectImages)
-      .where(and(eq(projectImages.projectId, projectId), eq(projectImages.isCover, true)))
-      .get();
-    return db
-      .insert(projectImages)
-      .values({ projectId, ...img, sortOrder: max + 1, isCover: !hasCover })
-      .returning()
-      .get();
-  },
-  byId: (id: number) => db.select().from(projectImages).where(eq(projectImages.id, id)).get(),
-  update: (id: number, patch: { alt?: string; sortOrder?: number; isCover?: boolean }) => {
-    const img = imageRepo.byId(id);
-    if (!img) return undefined;
-    if (patch.isCover) {
-      db.update(projectImages).set({ isCover: false }).where(eq(projectImages.projectId, img.projectId)).run();
-    }
-    return db.update(projectImages).set(patch).where(eq(projectImages.id, id)).returning().get();
-  },
-  reorder: (projectId: number, orderedIds: number[]) => {
-    orderedIds.forEach((imgId, idx) => {
-      db.update(projectImages)
-        .set({ sortOrder: idx })
-        .where(and(eq(projectImages.id, imgId), eq(projectImages.projectId, projectId)))
-        .run();
+  add: async (projectId: number, image: { basePath: string; width: number; height: number; alt: string }) => {
+    const [imageRows, covers] = await Promise.all([
+      rows<Pick<ProjectImage, "sortOrder">>("project_images", (q) => q.select("sort_order").eq("project_id", projectId).order("sort_order", { ascending: false }).limit(1)),
+      rows<Pick<ProjectImage, "id">>("project_images", (q) => q.select("id").eq("project_id", projectId).eq("is_cover", true).limit(1)),
+    ]);
+    return insertOne<ProjectImage>("project_images", {
+      projectId,
+      ...image,
+      sortOrder: (imageRows[0]?.sortOrder ?? -1) + 1,
+      isCover: covers.length === 0,
     });
   },
-  remove: (id: number) => {
-    const img = imageRepo.byId(id);
-    if (!img) return undefined;
-    db.delete(projectImages).where(eq(projectImages.id, id)).run();
-    if (img.isCover) {
-      const next = db
-        .select()
-        .from(projectImages)
-        .where(eq(projectImages.projectId, img.projectId))
-        .orderBy(asc(projectImages.sortOrder))
-        .get();
-      if (next) db.update(projectImages).set({ isCover: true }).where(eq(projectImages.id, next.id)).run();
+  byId: (id: number) => byId<ProjectImage>("project_images", id),
+  update: async (id: number, patch: { alt?: string; sortOrder?: number; isCover?: boolean }) => {
+    const image = await byId<ProjectImage>("project_images", id);
+    if (!image) return undefined;
+    if (patch.isCover) {
+      await run(getSupabase().from("project_images").update({ is_cover: false }).eq("project_id", image.projectId));
     }
-    return img;
+    return updateOne<ProjectImage>("project_images", id, patch);
+  },
+  reorder: async (projectId: number, orderedIds: number[]) => {
+    for (let sortOrder = 0; sortOrder < orderedIds.length; sortOrder++) {
+      const imageId = orderedIds[sortOrder];
+      await run(
+        getSupabase().from("project_images").update({ sort_order: sortOrder }).eq("id", imageId).eq("project_id", projectId),
+      );
+    }
+  },
+  remove: async (id: number) => {
+    const image = await byId<ProjectImage>("project_images", id);
+    if (!image) return undefined;
+    await run(getSupabase().from("project_images").delete().eq("id", id));
+    if (image.isCover) {
+      const next = await run<DbRow | null>(
+        getSupabase().from("project_images").select("*").eq("project_id", image.projectId).order("sort_order").limit(1).maybeSingle(),
+      );
+      if (next) {
+        await run(getSupabase().from("project_images").update({ is_cover: true }).eq("id", next.id));
+      }
+    }
+    return image;
   },
 };
 
-/* ------------------------------- Services ------------------------------ */
 export const serviceRepo = {
-  list: (visibleOnly: boolean): Service[] =>
-    db
-      .select()
-      .from(services)
-      .where(visibleOnly ? eq(services.visible, true) : undefined)
-      .orderBy(asc(services.sortOrder), asc(services.id))
-      .all(),
-  byId: (id: number) => db.select().from(services).where(eq(services.id, id)).get(),
-  create: (input: ServiceInput) =>
-    db.insert(services).values({ ...input, slug: uniqueSlug(services, input.name) }).returning().get(),
-  update: (id: number, input: Partial<ServiceInput>) => {
-    const patch: Partial<Service> = { ...input };
-    if (input.name) patch.slug = uniqueSlug(services, input.name, id);
-    return db.update(services).set(patch).where(eq(services.id, id)).returning().get();
+  list: (visibleOnly: boolean) =>
+    rows<Service>("services", (q) => {
+      const filtered = visibleOnly ? q.eq("visible", true) : q;
+      return filtered.order("sort_order").order("id");
+    }),
+  byId: (id: number) => byId<Service>("services", id),
+  create: async (input: ServiceInput) =>
+    insertOne<Service>("services", { ...input, slug: await uniqueSlug("services", input.name) }),
+  update: async (id: number, input: Partial<ServiceInput>) => {
+    const patch: Record<string, unknown> = { ...input };
+    if (input.name) patch.slug = await uniqueSlug("services", input.name, id);
+    return updateOne<Service>("services", id, patch);
   },
-  remove: (id: number) => db.delete(services).where(eq(services.id, id)).run().changes > 0,
+  remove: (id: number) => existsById("services", id),
 };
 
-/* ---------------------------- Cities / routing -------------------------- */
 export const managerRepo = {
-  list: (): CityManager[] => db.select().from(cityManagers).orderBy(asc(cityManagers.name)).all(),
-  byId: (id: number) => db.select().from(cityManagers).where(eq(cityManagers.id, id)).get(),
-  create: (input: ManagerInput) => db.insert(cityManagers).values(input).returning().get(),
-  update: (id: number, input: Partial<ManagerInput>) =>
-    db.update(cityManagers).set(input).where(eq(cityManagers.id, id)).returning().get(),
-  remove: (id: number) => db.delete(cityManagers).where(eq(cityManagers.id, id)).run().changes > 0,
+  list: () => rows<CityManager>("city_managers", (q) => q.order("name")),
+  byId: (id: number) => byId<CityManager>("city_managers", id),
+  create: (input: ManagerInput) => insertOne<CityManager>("city_managers", input),
+  update: (id: number, input: Partial<ManagerInput>) => updateOne<CityManager>("city_managers", id, input),
+  remove: (id: number) => existsById("city_managers", id),
 };
 
 export const cityRepo = {
-  list: (enabledOnly: boolean): CityWithManager[] => {
-    const rows = db
-      .select()
-      .from(cities)
-      .where(enabledOnly ? eq(cities.enabled, true) : undefined)
-      .orderBy(asc(cities.sortOrder), asc(cities.name))
-      .all();
-    const mgrs = new Map(managerRepo.list().map((m) => [m.id, m]));
-    return rows.map((c) => ({ ...c, manager: c.managerId ? mgrs.get(c.managerId) ?? null : null }));
+  list: async (enabledOnly: boolean): Promise<CityWithManager[]> => {
+    const [cityRows, managers] = await Promise.all([
+      rows<City>("cities", (q) => {
+        const filtered = enabledOnly ? q.eq("enabled", true) : q;
+        return filtered.order("sort_order").order("name");
+      }),
+      managerRepo.list(),
+    ]);
+    const managerMap = new Map(managers.map((manager) => [manager.id, manager]));
+    return cityRows.map((city) => ({
+      ...city,
+      manager: city.managerId ? managerMap.get(city.managerId) ?? null : null,
+    }));
   },
-  byId: (id: number): City | undefined => db.select().from(cities).where(eq(cities.id, id)).get(),
-  create: (input: CityInput) =>
-    db
-      .insert(cities)
-      .values({ ...input, managerId: input.managerId ?? null, slug: uniqueSlug(cities, input.name) })
-      .returning()
-      .get(),
-  update: (id: number, input: Partial<CityInput>) => {
-    const patch: Partial<City> = { ...input } as Partial<City>;
-    if (input.name) patch.slug = uniqueSlug(cities, input.name, id);
+  byId: (id: number) => byId<City>("cities", id),
+  create: async (input: CityInput) =>
+    insertOne<City>("cities", {
+      ...input,
+      managerId: input.managerId ?? null,
+      slug: await uniqueSlug("cities", input.name),
+    }),
+  update: async (id: number, input: Partial<CityInput>) => {
+    const patch: Record<string, unknown> = { ...input };
+    if (input.name) patch.slug = await uniqueSlug("cities", input.name, id);
     if ("managerId" in input) patch.managerId = input.managerId ?? null;
-    return db.update(cities).set(patch).where(eq(cities.id, id)).returning().get();
+    return updateOne<City>("cities", id, patch);
   },
-  remove: (id: number) => db.delete(cities).where(eq(cities.id, id)).run().changes > 0,
+  remove: (id: number) => existsById("cities", id),
 };
 
-/* ------------------------------- Enquiries ----------------------------- */
 export const enquiryRepo = {
-  create: (row: Omit<Enquiry, "id">) => db.insert(enquiries).values(row).returning().get(),
-  list: (status?: string): Enquiry[] =>
-    db
-      .select()
-      .from(enquiries)
-      .where(status && status !== "all" ? eq(enquiries.status, status) : undefined)
-      .orderBy(desc(enquiries.id))
-      .all(),
-  setStatus: (id: number, status: string) =>
-    db.update(enquiries).set({ status }).where(eq(enquiries.id, id)).returning().get(),
-  remove: (id: number) => db.delete(enquiries).where(eq(enquiries.id, id)).run().changes > 0,
-  countNew: () => db.select({ c: sql<number>`count(*)` }).from(enquiries).where(eq(enquiries.status, "new")).get()?.c ?? 0,
-  count: () => db.select({ c: sql<number>`count(*)` }).from(enquiries).get()?.c ?? 0,
+  create: (row: Omit<Enquiry, "id">) => insertOne<Enquiry>("enquiries", row),
+  list: (status?: string) =>
+    rows<Enquiry>("enquiries", (q) => {
+      const filtered = status && status !== "all" ? q.eq("status", status) : q;
+      return filtered.order("id", { ascending: false });
+    }),
+  setStatus: (id: number, status: string) => updateOne<Enquiry>("enquiries", id, { status }),
+  remove: (id: number) => existsById("enquiries", id),
+  countNew: () => countRows("enquiries", "status", "new"),
+  count: () => countRows("enquiries"),
 };
 
-/* ------------------------------ Site settings -------------------------- */
 const CONTENT_KEY = "site_content";
 export const settingsRepo = {
-  getContent: (): SiteContent | undefined => {
-    const row = db.select().from(siteSettings).where(eq(siteSettings.key, CONTENT_KEY)).get();
-    return row ? (JSON.parse(row.value) as SiteContent) : undefined;
+  getContent: async (): Promise<SiteContent | undefined> => {
+    const row = await run<DbRow | null>(
+      getSupabase().from("site_settings").select("value").eq("key", CONTENT_KEY).maybeSingle(),
+    );
+    return row ? (row.value as SiteContent) : undefined;
   },
-  setContent: (content: SiteContent) => {
-    const value = JSON.stringify(content);
-    db.insert(siteSettings)
-      .values({ key: CONTENT_KEY, value })
-      .onConflictDoUpdate({ target: siteSettings.key, set: { value } })
-      .run();
+  setContent: async (content: SiteContent) => {
+    await run(
+      getSupabase()
+        .from("site_settings")
+        .upsert({ key: CONTENT_KEY, value: content }, { onConflict: "key" }),
+    );
     return content;
   },
 };

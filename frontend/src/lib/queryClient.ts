@@ -69,7 +69,7 @@ export async function apiJson<T>(method: string, url: string, data?: unknown): P
 }
 
 /** Multipart upload with progress (XHR so we can report % to the admin). */
-export function apiUpload<T>(url: string, form: FormData, onProgress?: (pct: number) => void): Promise<T> {
+function legacyApiUpload<T>(url: string, form: FormData, onProgress?: (pct: number) => void): Promise<T> {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open("POST", `${API_BASE}${url}`);
@@ -102,6 +102,7 @@ export function asset(p: string) {
 }
 export function imageUrl(basePath: string, width: 640 | 1280 | 2000 = 1280) {
   if (!basePath) return "";
+  if (/^https?:\/\//i.test(basePath)) return `${basePath}-${width}.webp`;
   if (basePath.startsWith("/uploads/")) return `${API_BASE}${basePath}-${width}.webp`;
   return `${asset(basePath)}-${width}.webp`;
 }

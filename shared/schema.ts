@@ -1,139 +1,82 @@
-import { sqliteTable, text, integer, real, index } from "drizzle-orm/sqlite-core";
 import { z } from "zod";
 
-/* ------------------------------------------------------------------ */
-/*  Oak & Line — database schema                                        */
-/*  Relationships:                                                      */
-/*   projects.categoryId      -> categories.id                          */
-/*   project_images.projectId -> projects.id (cascade)                  */
-/*   cities.managerId         -> city_managers.id (nullable)            */
-/*   enquiries.cityId         -> cities.id (nullable, "Other" = null)   */
-/*   enquiries.serviceId      -> services.id (project type)             */
-/*   enquiries.routedManagerId-> city_managers.id (snapshot of routing) */
-/* ------------------------------------------------------------------ */
-
-export const admins = sqliteTable("admins", {
-  id: integer("id").primaryKey({ autoIncrement: true }),
-  email: text("email").notNull().unique(),
-  name: text("name").notNull(),
-  passwordHash: text("password_hash").notNull(),
-  role: text("role").notNull().default("owner"), // owner | editor
-});
-
-export const categories = sqliteTable("categories", {
-  id: integer("id").primaryKey({ autoIncrement: true }),
-  name: text("name").notNull(),
-  slug: text("slug").notNull().unique(),
-  sortOrder: integer("sort_order").notNull().default(0),
-});
-
-export const projects = sqliteTable(
-  "projects",
-  {
-    id: integer("id").primaryKey({ autoIncrement: true }),
-    name: text("name").notNull(),
-    slug: text("slug").notNull().unique(),
-    location: text("location").notNull(),
-    categoryId: integer("category_id").references(() => categories.id, { onDelete: "set null" }),
-    summary: text("summary").notNull().default(""),
-    description: text("description").notNull().default(""),
-    areaSqft: integer("area_sqft"),
-    year: integer("year"),
-    featured: integer("featured", { mode: "boolean" }).notNull().default(false),
-    published: integer("published", { mode: "boolean" }).notNull().default(false),
-    sortOrder: integer("sort_order").notNull().default(0),
-  },
-  (t) => [index("projects_category_idx").on(t.categoryId)],
-);
-
-export const projectImages = sqliteTable(
-  "project_images",
-  {
-    id: integer("id").primaryKey({ autoIncrement: true }),
-    projectId: integer("project_id")
-      .notNull()
-      .references(() => projects.id, { onDelete: "cascade" }),
-    /** base path without size suffix, e.g. /uploads/ab12cd */
-    basePath: text("base_path").notNull(),
-    width: integer("width").notNull(),
-    height: integer("height").notNull(),
-    alt: text("alt").notNull().default(""),
-    sortOrder: integer("sort_order").notNull().default(0),
-    isCover: integer("is_cover", { mode: "boolean" }).notNull().default(false),
-  },
-  (t) => [index("project_images_project_idx").on(t.projectId)],
-);
-
-export const services = sqliteTable("services", {
-  id: integer("id").primaryKey({ autoIncrement: true }),
-  name: text("name").notNull(),
-  slug: text("slug").notNull().unique(),
-  tagline: text("tagline").notNull().default(""),
-  description: text("description").notNull().default(""),
-  imagePath: text("image_path").notNull().default(""),
-  visible: integer("visible", { mode: "boolean" }).notNull().default(true),
-  sortOrder: integer("sort_order").notNull().default(0),
-});
-
-export const cityManagers = sqliteTable("city_managers", {
-  id: integer("id").primaryKey({ autoIncrement: true }),
-  name: text("name").notNull(),
-  title: text("title").notNull().default("City Manager"),
-  phone: text("phone").notNull().default(""),
-  whatsapp: text("whatsapp").notNull().default(""), // digits incl. country code
-  email: text("email").notNull().default(""),
-  active: integer("active", { mode: "boolean" }).notNull().default(true),
-});
-
-export const cities = sqliteTable("cities", {
-  id: integer("id").primaryKey({ autoIncrement: true }),
-  name: text("name").notNull(),
-  slug: text("slug").notNull().unique(),
-  state: text("state").notNull().default(""),
-  enabled: integer("enabled", { mode: "boolean" }).notNull().default(true),
-  sortOrder: integer("sort_order").notNull().default(0),
-  managerId: integer("manager_id").references(() => cityManagers.id, { onDelete: "set null" }),
-  /** optional override number; falls back to manager → default business number */
-  routingWhatsapp: text("routing_whatsapp").notNull().default(""),
-  routingEmail: text("routing_email").notNull().default(""),
-  routingNotes: text("routing_notes").notNull().default(""),
-});
-
-export const enquiries = sqliteTable("enquiries", {
-  id: integer("id").primaryKey({ autoIncrement: true }),
-  name: text("name").notNull(),
-  phone: text("phone").notNull(),
-  email: text("email").notNull().default(""),
-  cityId: integer("city_id").references(() => cities.id, { onDelete: "set null" }),
-  cityName: text("city_name").notNull(), // resolved name or custom "Other" text
-  serviceId: integer("service_id").references(() => services.id, { onDelete: "set null" }),
-  projectType: text("project_type").notNull(),
-  budget: text("budget").notNull(),
-  preferredDate: text("preferred_date").notNull(),
-  preferredTime: text("preferred_time").notNull(),
-  meetingType: text("meeting_type").notNull(), // online | offline
-  meetingAddress: text("meeting_address").notNull().default(""),
-  message: text("message").notNull().default(""),
-  routedManagerId: integer("routed_manager_id").references(() => cityManagers.id, { onDelete: "set null" }),
-  routedTo: text("routed_to").notNull().default(""),
-  status: text("status").notNull().default("new"), // new | contacted | scheduled | won | closed
-  createdAt: text("created_at").notNull(),
-});
-
-export const siteSettings = sqliteTable("site_settings", {
-  key: text("key").primaryKey(),
-  value: text("value").notNull(), // JSON-encoded
-});
-
-/* ------------------------------ Types ------------------------------ */
-export type Admin = typeof admins.$inferSelect;
-export type Category = typeof categories.$inferSelect;
-export type Project = typeof projects.$inferSelect;
-export type ProjectImage = typeof projectImages.$inferSelect;
-export type Service = typeof services.$inferSelect;
-export type CityManager = typeof cityManagers.$inferSelect;
-export type City = typeof cities.$inferSelect;
-export type Enquiry = typeof enquiries.$inferSelect;
+export type Admin = { id: number; email: string; name: string; passwordHash: string; role: string };
+export type Category = { id: number; name: string; slug: string; sortOrder: number };
+export type Project = {
+  id: number;
+  name: string;
+  slug: string;
+  location: string;
+  categoryId: number | null;
+  summary: string;
+  description: string;
+  areaSqft: number | null;
+  year: number | null;
+  featured: boolean;
+  published: boolean;
+  sortOrder: number;
+};
+export type ProjectImage = {
+  id: number;
+  projectId: number;
+  basePath: string;
+  width: number;
+  height: number;
+  alt: string;
+  sortOrder: number;
+  isCover: boolean;
+};
+export type Service = {
+  id: number;
+  name: string;
+  slug: string;
+  tagline: string;
+  description: string;
+  imagePath: string;
+  visible: boolean;
+  sortOrder: number;
+};
+export type CityManager = {
+  id: number;
+  name: string;
+  title: string;
+  phone: string;
+  whatsapp: string;
+  email: string;
+  active: boolean;
+};
+export type City = {
+  id: number;
+  name: string;
+  slug: string;
+  state: string;
+  enabled: boolean;
+  sortOrder: number;
+  managerId: number | null;
+  routingWhatsapp: string;
+  routingEmail: string;
+  routingNotes: string;
+};
+export type Enquiry = {
+  id: number;
+  name: string;
+  phone: string;
+  email: string;
+  cityId: number | null;
+  cityName: string;
+  serviceId: number | null;
+  projectType: string;
+  budget: string;
+  preferredDate: string;
+  preferredTime: string;
+  meetingType: string;
+  meetingAddress: string;
+  message: string;
+  routedManagerId: number | null;
+  routedTo: string;
+  status: string;
+  createdAt: string;
+};
 
 export type ProjectWithImages = Project & { category: Category | null; images: ProjectImage[] };
 export type CityWithManager = City & { manager: CityManager | null };

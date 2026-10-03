@@ -1,79 +1,78 @@
-# Deploying Oak & Line on client-owned accounts
+# Deploy Oak & Line with Supabase and Netlify
 
+Netlify hosts both the website and its serverless Express API. Supabase provides Postgres for business data and Storage for uploaded project photos. There is no separate Render server.
+
+```text
+Visitors → Netlify site + Functions → Supabase Postgres
+                               └────→ Supabase Storage
 ```
-Visitor ──► Netlify (website files)  ──/api, /uploads, /sitemap.xml──►  Render (Node API + SQLite + photos on a disk)
-            oakandline.in                                              oakline-api.onrender.com
-```
 
-Every account below must be created **with the business's email** (e.g. `studio@oakandline.in`), not a developer's. A developer can be invited as a team member and removed later.
+## 1. Set up the empty Supabase project
 
-| Account | Purpose | Cost (approx.) |
-|---|---|---|
-| GitHub | Holds the code; Netlify and Render deploy from it | Free |
-| Render | API, database, uploaded photos | Starter instance + 5 GB disk ≈ US$8/month |
-| Netlify | Public website + admin screens | Free tier is enough |
-| Domain registrar | `oakandline.in` | Yearly |
+1. Open your Supabase project dashboard and select **SQL Editor → New query**.
+2. Open `supabase/setup.sql` from this folder, copy all of it into the SQL Editor, and click **Run**. It creates the app tables and a public-read `oakline-uploads` bucket. Row-level security is enabled on the app tables; only the server-side service-role key can read or change them.
+3. In **Project Settings → API**, copy:
+   - The **Project URL**.
+   - The **anon / publishable key**. This key is public and is used for signed browser uploads.
+   - The **service_role / secret key**. Keep this private. It is used only by the Netlify Function and must never be added as a `VITE_` variable.
 
-Alternatives to Render: Railway or Fly.io (use the included `Dockerfile` and attach a volume at `/data`), or any VPS with Docker.
+Do not paste your private service-role key into chat, GitHub, or a frontend setting.
 
----
+## 2. Push the project to GitHub
 
-## Project layout
+Use the prepared repository [vanshbhavsar1708/oakandline](https://github.com/vanshbhavsar1708/oakandline) or upload the complete project folder to a new repository. The root `package.json`, `package-lock.json`, `netlify.toml`, `frontend/`, `backend/`, `netlify/`, `shared/`, `script/`, and `supabase/` must stay together. Netlify builds from the repository root.
 
-The repository root contains the Netlify and Render configuration, with frontend and backend source separated into `frontend/` and `backend/`. Keep the root `package.json`, lockfile, `shared/`, and `script/` when uploading the project; both hosting providers build from the repository root.
+Do not upload `.env`, `node_modules/`, or local build output.
 
-## 1. GitHub (≈5 min)
-1. Create a GitHub account with the business email → New repository → `oak-line-website` → **Private**.
-2. Upload the project (or `git remote add origin … && git push -u origin main`).
-   `data/`, `.env` and `node_modules/` are already excluded by `.gitignore`.
+## 3. Connect the repository to Netlify
 
-## 2. Render — API, database and photos (≈10 min)
-1. Sign up at render.com with the business email and connect the GitHub account.
-2. **New → Blueprint →** choose the repo. Render reads `render.yaml` and proposes the service `oakline-api` with a 5 GB disk at `/var/data`.
-3. Fill in the prompted values:
-   - `ADMIN_EMAIL`: the owner's login email
-   - `ADMIN_PASSWORD`: a strong password (used only on first boot; change it later in the admin)
-   - `PUBLIC_SITE_URL`: `https://www.oakandline.in` (or the Netlify URL for staging)
-   - `AUTH_SECRET` is generated automatically.
-4. Click **Apply**. When the deploy finishes, open `https://<your-service>.onrender.com/api/health`. It should show `{"ok":true}`.
-5. Copy that origin (e.g. `https://oakline-api.onrender.com`). You need it for Netlify.
+1. In Netlify, choose **Add new site → Import an existing project**, connect GitHub, and select `oakandline`.
+2. Leave the base directory empty (repository root). Netlify reads the build command and publish folder from `netlify.toml`.
+3. Before deploying, open **Site configuration → Environment variables** and add:
 
-> The Render service can also serve the full website on its own at its onrender.com address, which is handy as a backup or staging check.
+   | Variable | Value |
+   |---|---|
+   | `SUPABASE_URL` | Supabase Project URL |
+   | `SUPABASE_SERVICE_ROLE_KEY` | Supabase private service-role / secret key |
+   | `VITE_SUPABASE_URL` | Same Supabase Project URL |
+   | `VITE_SUPABASE_ANON_KEY` | Supabase anon / publishable key |
+   | `AUTH_SECRET` | A new, long random secret used to sign admin sessions |
+   | `ADMIN_EMAIL` | The owner's admin login email |
+   | `ADMIN_PASSWORD` | A strong, unique first admin password |
+   | `SEED_DEMO_PROJECTS` | `false` to start with an empty portfolio |
+   | `PUBLIC_SITE_URL` | Netlify site URL, such as `https://your-site.netlify.app` |
 
-## 3. Netlify — the website (≈5 min)
-1. Sign up at netlify.com with the business email → **Add new site → Import from Git →** choose the repo.
-2. Build settings are read from `netlify.toml` (command `npm run build:netlify`, publish `dist/public`).
-3. **Site configuration → Environment variables → Add**: `API_ORIGIN` = the Render origin from step 2.5.
-4. Deploy. The build fails with a clear message if `API_ORIGIN` is missing.
-5. Test the Netlify URL: home page → Work → a project → Contact (send a test enquiry) → `/admin` login.
+   `SUPABASE_SERVICE_ROLE_KEY` and `AUTH_SECRET` are private. Never add either to a variable beginning with `VITE_`.
 
-## 4. Domain (≈15 min + DNS time)
-1. Netlify → **Domain management → Add domain** → `oakandline.in` and `www.oakandline.in`. Follow Netlify's DNS instructions at the registrar. HTTPS is issued automatically.
-2. Update `PUBLIC_SITE_URL` on Render to the final domain, then redeploy Render.
+4. Start the deploy. Netlify builds the Vite site and deploys the `netlify/functions/api.ts` serverless API. The first API request seeds the initial admin, site content, services, categories, and cities.
 
-## 5. First-day checklist (in /admin)
-- [ ] Website Content: real WhatsApp number (with country code, e.g. 9198…), phone, email, studio address, Instagram
-- [ ] Cities & Routing → Managers: add each city manager's name and WhatsApp number; assign cities
-- [ ] Projects: add real projects and photos; unpublish or delete the demo projects
-      (or set `SEED_DEMO_PROJECTS=false` on Render *before the first deploy* to start empty)
-- [ ] Website Content → Founders: confirm names, roles and portraits
-- [ ] Send a test enquiry from a phone and check it opens WhatsApp to the right person
+## 4. Check the live site
 
-## Backups
-The whole business database is two things on the Render disk: `/var/data/oakline.db` and `/var/data/uploads/`.
-- Render keeps daily disk snapshots (Disk → Snapshots); you can restore from there.
-- For an extra copy: Render Shell → `cd /var/data && tar czf backup-$(date +%F).tgz oakline.db uploads`, then download it.
+- Website: `https://your-site.netlify.app`
+- Admin: `https://your-site.netlify.app/admin`
+- API health check: `https://your-site.netlify.app/api/health`
 
-## Handover / changing developers
-- Developers are added as **members** on GitHub, Render and Netlify, never as owners. Remove them when the work ends.
-- To lock out every logged-in admin session, change `AUTH_SECRET` on Render and redeploy.
-- Admin passwords are stored only as scrypt hashes; nobody can read them, including developers.
+Sign in with the `ADMIN_EMAIL` and `ADMIN_PASSWORD` you set. Add real projects and photos in Admin → Projects. Photos upload directly to Supabase Storage using short-lived signed URLs; the service-role key stays on the server.
+
+## 5. Optional custom domain
+
+In Netlify, open **Domain management → Add a domain**, add the business domain, and follow the DNS instructions. Then update `PUBLIC_SITE_URL` in Netlify and redeploy.
+
+## Local development
+
+1. Copy `.env.example` to `.env` and fill in your Supabase URL, keys, admin credentials, and `AUTH_SECRET`.
+2. Run `npm install` and `npm run dev` from the project root.
+3. Open `http://localhost:5000`.
+
+The Supabase tables and Storage bucket must be set up before the first API request. Keep `.env` private; it is excluded from Git.
 
 ## Troubleshooting
-| Symptom | Fix |
+
+| Symptom | Check |
 |---|---|
-| Site loads but projects/enquiries fail | `API_ORIGIN` on Netlify is wrong or Render is asleep/failed. Open `<API_ORIGIN>/api/health` |
-| Netlify build: "API_ORIGIN must be set" | Add the variable (step 3.3) and redeploy |
-| Render boot error "AUTH_SECRET / ADMIN_PASSWORD must be set" | Add the missing variable in Render → Environment |
-| Photos disappear after a redeploy | The disk isn't attached. `DATABASE_PATH`/`UPLOAD_DIR` must point inside `/var/data` |
-| Large photo batches fail | Upload fewer at a time; each photo must be under 15 MB |
+| Netlify build fails on Vite Supabase variables | Set `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY`, then trigger a new deploy. |
+| API responds with missing Supabase settings | Set `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` in Netlify. |
+| Admin cannot sign in | Check `ADMIN_EMAIL` / `ADMIN_PASSWORD`; the admin is created on the first API request after the schema is installed. |
+| Photo upload fails in the browser | Confirm `supabase/setup.sql` created the `oakline-uploads` bucket and the bucket allows the site origin for Storage CORS. |
+| API reports missing database tables | Run `supabase/setup.sql` in the correct Supabase project's SQL Editor. |
+| Admin or project links return 404 | Keep the included `netlify.toml` and deploy from the repository root so the SPA and API redirects are installed. |
