@@ -1,0 +1,28 @@
+# Oak & Line — Netlify hosts the public website + admin screens (static files).
+# The API, database and uploaded photos live on the client-owned Node host (see DEPLOYMENT.md).
+# Required Netlify environment variable: API_ORIGIN  (e.g. https://oakline-api.onrender.com)
+[build]
+  command = "npm run build:netlify"
+  publish = "dist/public"
+
+[build.environment]
+  NODE_VERSION = "20"
+  VITE_ROUTER = "browser"
+
+[[headers]]
+  for = "/assets/*"
+  [headers.values]
+    Cache-Control = "public, max-age=31536000, immutable"
+
+[[headers]]
+  for = "/images/*"
+  [headers.values]
+    Cache-Control = "public, max-age=2592000"
+
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Content-Type-Options = "nosniff"
+    Referrer-Policy = "strict-origin-when-cross-origin"
+    X-Frame-Options = "SAMEORIGIN"
+    Permissions-Policy = "camera=(), microphone=(), geolocation=()"
