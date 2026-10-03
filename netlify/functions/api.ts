@@ -16,6 +16,24 @@ async function initializeFunction() {
     if (req.url === functionPrefix || req.url.startsWith(`${functionPrefix}/`)) {
       req.url = req.url.slice(functionPrefix.length) || "/";
     }
+    const request = req as Request & { body?: unknown };
+    if (Buffer.isBuffer(request.body)) {
+      const body = request.body;
+      const contentType = String(req.headers["content-type"] ?? "").split(";")[0].trim().toLowerCase();
+      if (body.length === 0) {
+        delete request.body;
+      } else if (contentType === "application/json" || contentType.endsWith("+json")) {
+        try {
+          request.body = JSON.parse(body.toString("utf8"));
+        } catch (error) {
+          return next(error);
+        }
+      } else if (contentType === "application/x-www-form-urlencoded") {
+        request.body = Object.fromEntries(new URLSearchParams(body.toString("utf8")));
+      } else {
+        delete request.body;
+      }
+    }
     next();
   });
   app.use(
